@@ -31,7 +31,7 @@ db = client.flaskDB  # Database Name
 users = db.users       # Collection for user details
 posts = db.posts       # Collection for posts
 likes = db.likes       # Collection for likes
-
+total_posts= db.total_posts   #collection for post create 
 
 @app.route("/")
 def home():
@@ -43,10 +43,12 @@ def user_register():
     data = request.json  #{"email","password"}
     if users.find_one({"email": data["email"]}):
         return jsonify({"error": "User already exists"}), 400
+    data["points"]=0
     users.insert_one(data)
     return jsonify({"message": "User registered successfully"}), 201
 
 
+#update this api path 
 @app.route("/user/login",methods=["POST"])
 def user_login():
     try:
@@ -68,8 +70,21 @@ def user_login():
 @app.route("/user/profile",methods=["POST"])
 def user_profile():
     data=request.json #{"email"}
-    #return all posts with his email and some other datails
-    return jsonify({"message":"Successfully profile send"}), 201
+    #send everyData except 
+    result=users.find_one({"email":data["email"]})
+    return jsonify({"message":result}), 201
+
+
+@app.route("/user/leaderboard",methods=["POST"])
+def user_leaderBoard():
+    #send top 5 profiles (name ,points) based on points they earned now
+    top_users = users.find({}, {"_id": 0, "name": 1, "points": 1}).sort("points", -1).limit(5)
+
+    # Convert to a list (array)
+    result = list(top_users)
+    return jsonify({"message":result}),201
+
+
 
 
 # -------------------- Post Routes --------------------
@@ -101,7 +116,7 @@ def post_create():
         json_data = request.form.get("json_data")
         if not json_data:
             return jsonify({"error": "Missing JSON data"}), 400
-
+        
         # ✅ Parse JSON
         data, error = validate_and_fix_json(json_data)
         if error:
@@ -121,11 +136,18 @@ def post_create():
             })
 
         # ✅ Insert into MongoDB
+        data["solved"]=None
         data["post_Id"] = post_Id
         data["image_data"] = image_documents
         posts.insert_one(data)
 
-        return jsonify({"message": "Post created successfully", "post_Id": post_Id}), 201
+        #increase points to user point table
+        users.update_one({"email": data["email"]}, {"$inc": {"points": 1}})
+
+        #add this post into toal posts table
+        total_posts.insert_one({"post_Id":post_Id})
+
+        return jsonify({"message":post_Id}), 201
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -137,6 +159,8 @@ def post_delete():
     data=request.json   #{"post_Id"}
     result = posts.delete_one({"post_Id": data["post_Id"]})
     if result.deleted_count == 1:
+        #remove this post into toal posts table
+        total_posts.delete_one({"post_Id":data["post_Id"]})
         return jsonify({"message": "Post deleted successfully"}), 200
     else:
         return jsonify({"error": "Post not found"}), 404
@@ -147,10 +171,37 @@ def post_search():
     #search post by unique parameter  complete this
     data=request.json
     post_Id=data["post_Id"]
+    solved_Id=data["solved_Id"]
     result=posts.find_one({"post_Id":post_Id})
-    print(result)
-    return jsonify({"message":"Successfully get image"}), 201
+    if result:
+        posts.update_one({"post_Id":post_Id},{"$set": {"solved": solved_Id}})
+        return jsonify({"message":"Status Update"}),201
+    else:
+        return jsonify({"message":"Post does not exist"}), 400
 
+
+@app.route("/post/feed", methods=["POST"])
+def post_feed():
+    #send all post with add of total likes count and like by him or not
+
+    #collection of all post_Id
+    post_ids = [post["post_Id"] for post in total_posts.find({}, {"post_Id": 1})]
+
+    # Traverse each post_id and count total likes
+    result = []
+    for post_id in post_ids:
+        data=posts.find_one({"post_Id":post_id})
+        total_likes = likes.count_documents({"post_id": post_id})  # Count likes for each post_id
+        likeByHim= likes.find_one({"post_Id":post_id,"email":data["email"]})
+        if likeByHim:
+            likeByHim=True
+        else:
+            likeByHim=False
+        data["total_likes"]=total_likes
+        data["like"]=likeByHim
+        result.append(data)
+
+    return jsonify({"message": result}),201
 
 
 # -------------------- Likes Routes --------------------
@@ -164,41 +215,21 @@ def like_post():
 
         # Check if the user has already liked this post
         if likes.find_one({"post_Id": data["post_Id"], "email": data["email"]}):
-            return jsonify({"error": "Already liked the post"}), 400
+            #remove this
+            likes.delete_one({"post_Id":data["post_Id"],"email":data["email"]})
 
-        # Insert the like into the likes collection
-        data["liked"] = True
-        result = likes.insert_one(data)
-        
-        likes_count = likes.count_documents({"post_Id": data["post_Id"]})
-        return jsonify({"message": likes_count}), 200
-        
-
-    except errors.ConnectionFailure:
-        return jsonify({"error": "Database connection failed"}), 500  # Handle MongoDB connection failure
-
-    except errors.WriteError:
-        return jsonify({"error": "Failed to write to database"}), 500  # Handle write failures
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500  # Catch all other unexpected errors
-
-
-@app.route("/unlikePost", methods=["POST"])
-def unlike_post():
-    try:
-        data = request.json  # Expecting {"post_Id": "...", "email": "..."}
-
-        if not data.get("post_Id") or not data.get("email"):
-            return jsonify({"error": "post_Id and email are required"}), 400
-
-        result = likes.delete_one({"post_Id": data["post_Id"],"email":data["email"]})
-
-        if result.deleted_count == 1:
-            likes_count = likes.count_documents({"post_Id": data["post_Id"]})
-            return jsonify({"message": likes_count}), 200
+            #decrease points to user point table
+            users.update_one({"email": data["email"]}, {"$dec": {"points": 1}}) 
+            return jsonify({"message": False}), 200
         else:
-            return jsonify({"error": "Post not found"}), 404
+            #add this
+            likes.insert_one({"post_Id":data["post_Id"],"email":data["email"]})
+
+            #increase points to user point table
+            users.update_one({"email": data["email"]}, {"$inc": {"points": 1}})
+            
+            return jsonify({"message":True}), 200
+        
 
     except errors.ConnectionFailure:
         return jsonify({"error": "Database connection failed"}), 500  # Handle MongoDB connection failure
@@ -212,4 +243,4 @@ def unlike_post():
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)  # Accessible from LAN
